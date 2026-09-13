@@ -1,0 +1,6 @@
+{
+  "_comment": "POST /contacts/{contactId}/notes   Header: Version: 2021-07-28",
+  "_note": "Short and scannable. The office reads this in the contact timeline.",
+  "body": "{{ installer_name }} clocked in {{ clockin_time_human }}, {{ clockin_distance_m }} m from site.\nPhoto: {{ selfie_signed_url }}",
+  "userId": "{{ ghl_user_id }}"
+}

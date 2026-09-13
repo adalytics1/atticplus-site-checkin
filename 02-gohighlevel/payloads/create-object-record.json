@@ -1,0 +1,26 @@
+{
+  "_comment": "POST /objects/custom_objects.site_visit/records   Header: Version: v3",
+  "_note": "Placeholders in {{ }} are filled by n8n from the Supabase site_visits row.",
+  "locationId": "{{ $env.GHL_LOCATION_ID }}",
+  "properties": {
+    "visit_label": "{{ installer_name }} — {{ clockin_date_short }}, {{ suburb }}",
+    "installer_name": "{{ installer_name }}",
+    "ghl_appointment_id": "{{ ghl_appointment_id }}",
+    "clockin_time": "{{ clockin_at_iso }}",
+    "clockout_time": "{{ clockout_at_iso }}",
+    "time_on_site": "{{ duration_human }}",
+    "clockin_coords": "{{ clockin_lat }}, {{ clockin_lng }}",
+    "distance_from_job_m": "{{ clockin_distance_m }}",
+    "gps_accuracy_m": "{{ clockin_accuracy_m }}",
+    "map_link": "https://maps.google.com/?q={{ clockin_lat }},{{ clockin_lng }}",
+    "selfie_url": "{{ selfie_signed_url }}",
+    "completed_work_url": "{{ completed_work_signed_url }}",
+    "status": "On site"
+  },
+  "associations": [
+    {
+      "objectKey": "contact",
+      "recordId": "{{ ghl_contact_id }}"
+    }
+  ]
+}

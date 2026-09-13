@@ -1,0 +1,220 @@
+{
+  "name": "AtticPlus \u2014 01 Sync Jobs from GHL Calendar",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "every-15-min",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1",
+              "name": "ghlLocationId",
+              "value": "={{ $env.GHL_LOCATION_ID }}",
+              "type": "string"
+            },
+            {
+              "id": "2",
+              "name": "ghlCalendarId",
+              "value": "={{ $env.GHL_CALENDAR_ID }}",
+              "type": "string"
+            },
+            {
+              "id": "3",
+              "name": "supabaseUrl",
+              "value": "={{ $env.SUPABASE_URL }}",
+              "type": "string"
+            },
+            {
+              "id": "4",
+              "name": "supabaseServiceKey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services.leadconnectorhq.com/calendars/events",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "locationId",
+              "value": "={{ $json.ghlLocationId }}"
+            },
+            {
+              "name": "calendarId",
+              "value": "={{ $json.ghlCalendarId }}"
+            },
+            {
+              "name": "startTime",
+              "value": "={{ DateTime.now().setZone('Australia/Sydney').startOf('day').toMillis() }}"
+            },
+            {
+              "name": "endTime",
+              "value": "={{ DateTime.now().setZone('Australia/Sydney').endOf('day').toMillis() }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GHL_PIT }}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-04-15"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ghl:-get-today's-events",
+      "name": "GHL: Get Today's Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise GHL appointments, drop what we can't use, geocode new addresses.\n// Nominatim usage policy: max 1 request/second, identifying User-Agent.\n\nconst GEOCODE_DELAY_MS = 1100;\nconst sleep = (ms) => new Promise(r => setTimeout(r, ms));\n\nconst cfg = $('Config').first().json;\nconst events = $input.first().json.events || [];\n\n// Installer lookup: GHL user id -> Supabase installer id\nconst installers = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `${cfg.supabaseUrl}/rest/v1/installers?select=id,ghl_user_id&active=eq.true`,\n  headers: { apikey: cfg.supabaseServiceKey, Authorization: `Bearer ${cfg.supabaseServiceKey}` },\n  json: true,\n});\nconst byGhlUser = Object.fromEntries(installers.filter(i => i.ghl_user_id).map(i => [i.ghl_user_id, i.id]));\n\n// Appointments we already have coordinates for \u2014 don't re-geocode.\nconst known = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `${cfg.supabaseUrl}/rest/v1/jobs?select=ghl_appointment_id,address,lat,lng&lat=not.is.null`,\n  headers: { apikey: cfg.supabaseServiceKey, Authorization: `Bearer ${cfg.supabaseServiceKey}` },\n  json: true,\n});\nconst cachedByAddress = Object.fromEntries(known.filter(j => j.address).map(j => [j.address.trim().toLowerCase(), j]));\n\nconst out = [];\nconst skipped = [];\n\nfor (const ev of events) {\n  const status = (ev.appointmentStatus || '').toLowerCase();\n  if (status === 'cancelled') continue;\n\n  const installerId = byGhlUser[ev.assignedUserId];\n  if (!installerId) {\n    // Unassigned jobs cannot appear in anyone's list. Surface, don't silently drop.\n    skipped.push({ id: ev.id, reason: 'no matching installer for assignedUserId ' + ev.assignedUserId });\n    continue;\n  }\n\n  const address = (ev.address || ev.meetingLocation || '').trim();\n  let lat = null, lng = null;\n\n  if (address) {\n    const cached = cachedByAddress[address.toLowerCase()];\n    if (cached) {\n      lat = cached.lat; lng = cached.lng;\n    } else {\n      await sleep(GEOCODE_DELAY_MS);\n      try {\n        const res = await this.helpers.httpRequest({\n          method: 'GET',\n          url: 'https://nominatim.openstreetmap.org/search',\n          qs: { q: address, format: 'json', limit: 1, countrycodes: 'au' },\n          headers: { 'User-Agent': 'AtticPlus-SiteCheckin/1.0 (info@adalytics.com.au)' },\n          json: true,\n        });\n        if (res && res[0]) { lat = parseFloat(res[0].lat); lng = parseFloat(res[0].lon); }\n      } catch (e) {\n        skipped.push({ id: ev.id, reason: 'geocode failed: ' + e.message });\n      }\n    }\n  } else {\n    skipped.push({ id: ev.id, reason: 'no address on appointment \u2014 distance cannot be measured' });\n  }\n\n  out.push({\n    json: {\n      source: 'ghl_calendar',\n      ghl_appointment_id: ev.id,\n      ghl_contact_id: ev.contactId || null,\n      customer_name: ev.title || null,\n      address: address || null,\n      lat, lng,\n      geocoded_at: lat ? new Date().toISOString() : null,\n      scheduled_start: ev.startTime,\n      scheduled_end: ev.endTime,\n      assigned_installer_id: installerId,\n      status: 'scheduled',\n      synced_at: new Date().toISOString(),\n    },\n  });\n}\n\nif (skipped.length) console.log('SKIPPED APPOINTMENTS:', JSON.stringify(skipped, null, 2));\nreturn out;"
+      },
+      "id": "normalise-+-geocode",
+      "name": "Normalise + Geocode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.supabaseUrl }}/rest/v1/jobs?on_conflict=ghl_appointment_id",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $('Config').first().json.supabaseServiceKey }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Config').first().json.supabaseServiceKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "supabase:-upsert-jobs",
+      "name": "Supabase: Upsert Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Every 15 min": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "GHL: Get Today's Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GHL: Get Today's Events": {
+      "main": [
+        [
+          {
+            "node": "Normalise + Geocode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise + Geocode": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Upsert Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

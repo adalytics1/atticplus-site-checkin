@@ -1,0 +1,236 @@
+{
+  "name": "AtticPlus \u2014 02 Push Visit to GHL",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "atticplus-site-visit",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "supabase-webhook",
+      "name": "Supabase Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the GoHighLevel payload from a site_visits row.\n// Triggered by a Supabase database webhook on insert/update of site_visits.\n\nconst SIGNED_URL_TTL = 60 * 60 * 24 * 365 * 5; // 5 years \u2014 Terry clicks these long after the job\n\nconst SUPABASE_URL = $env.SUPABASE_URL;\nconst KEY = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst hdr = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };\n\nconst body = $input.first().json.body || $input.first().json;\nconst visit = body.record || body;\n\nif (!visit || !visit.id) throw new Error('No site_visits record in webhook payload');\n\n// Pull the job and installer this visit belongs to.\nconst [job] = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `${SUPABASE_URL}/rest/v1/jobs?id=eq.${visit.job_id}&select=*`,\n  headers: hdr, json: true,\n});\nconst [installer] = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `${SUPABASE_URL}/rest/v1/installers?id=eq.${visit.installer_id}&select=full_name,ghl_user_id`,\n  headers: hdr, json: true,\n});\n\n// Long-lived signed URLs for the photos. The bucket stays private.\nasync function sign(path) {\n  if (!path) return null;\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${SUPABASE_URL}/storage/v1/object/sign/site-photos/${path}`,\n    headers: hdr,\n    body: { expiresIn: SIGNED_URL_TTL },\n    json: true,\n  });\n  return res?.signedURL ? `${SUPABASE_URL}/storage/v1${res.signedURL}` : null;\n}\nconst signFn = sign.bind(this);\n\nconst selfie = await signFn(visit.clockin_photo_path);\nconst completed = await signFn(visit.clockout_photo_path);\n\n// Formatting. GoHighLevel has no duration type, so time_on_site is a string.\nconst syd = (iso) => iso ? new Date(iso).toLocaleString('en-AU', {\n  timeZone: 'Australia/Sydney', day: 'numeric', month: 'short',\n  hour: 'numeric', minute: '2-digit', hour12: true }) : null;\n\nconst mins = visit.duration_minutes;\nconst durationHuman = mins == null ? '' : `${Math.floor(mins/60)}h ${String(mins%60).padStart(2,'0')}m`;\n\nconst suburb = (job?.address || '').split(',').slice(-2)[0]?.trim() || '';\nconst dateShort = visit.clockin_at\n  ? new Date(visit.clockin_at).toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney', day: 'numeric', month: 'short' })\n  : '';\n\nconst isClockOut = !!visit.clockout_at;\nconst distance = visit.clockin_distance_m == null ? null : Math.round(visit.clockin_distance_m);\n\nreturn [{\n  json: {\n    visit_id: visit.id,\n    ghl_record_id: visit.ghl_record_id || null,\n    is_clock_out: isClockOut,\n    ghl_contact_id: job?.ghl_contact_id || null,\n    ghl_user_id: installer?.ghl_user_id || null,\n    record: {\n      visit_label: `${installer?.full_name || 'Unknown'} \u2014 ${dateShort}${suburb ? ', ' + suburb : ''}`,\n      installer_name: installer?.full_name || 'Unknown',\n      ghl_appointment_id: job?.ghl_appointment_id || '',\n      clockin_time: visit.clockin_at,\n      clockout_time: visit.clockout_at,\n      time_on_site: durationHuman,\n      clockin_coords: `${visit.clockin_lat}, ${visit.clockin_lng}`,\n      distance_from_job_m: distance,\n      gps_accuracy_m: visit.clockin_accuracy_m == null ? null : Math.round(visit.clockin_accuracy_m),\n      map_link: `https://maps.google.com/?q=${visit.clockin_lat},${visit.clockin_lng}`,\n      selfie_url: selfie,\n      completed_work_url: completed,\n      status: isClockOut ? 'Complete' : 'On site',\n    },\n    note_body: isClockOut\n      ? `${installer?.full_name} clocked out ${syd(visit.clockout_at)}. On site ${durationHuman}.\\nCompleted work: ${completed || 'no photo'}`\n      : `${installer?.full_name} clocked in ${syd(visit.clockin_at)}${distance != null ? `, ${distance} m from site` : ''}.\\nPhoto: ${selfie || 'no photo'}`,\n  },\n}];"
+      },
+      "id": "build-ghl-payload",
+      "name": "Build GHL Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://services.leadconnectorhq.com/objects/custom_objects.site_visit/records{{ $json.ghl_record_id ? '/' + $json.ghl_record_id : '' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GHL_PIT }}"
+            },
+            {
+              "name": "Version",
+              "value": "v3"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ locationId: $env.GHL_LOCATION_ID, properties: $json.record, associations: $json.ghl_contact_id ? [{ objectKey: 'contact', recordId: $json.ghl_contact_id }] : [] }) }}",
+        "options": {}
+      },
+      "id": "ghl-upsert-site-visit-record",
+      "name": "GHL: Upsert Site Visit Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              },
+              "leftValue": "={{ $('Build GHL Payload').first().json.ghl_contact_id }}",
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-contact?",
+      "name": "Has Contact?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://services.leadconnectorhq.com/contacts/{{ $('Build GHL Payload').first().json.ghl_contact_id }}/notes",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GHL_PIT }}"
+            },
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ body: $('Build GHL Payload').first().json.note_body, userId: $('Build GHL Payload').first().json.ghl_user_id }) }}",
+        "options": {}
+      },
+      "id": "ghl-write-contact-note",
+      "name": "GHL: Write Contact Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/site_visits?id=eq.{{ $('Build GHL Payload').first().json.visit_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ghl_record_id: $('GHL: Upsert Site Visit Record').first().json.id, ghl_synced_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "id": "supabase-mark-synced",
+      "name": "Supabase: Mark Synced",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Supabase Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build GHL Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build GHL Payload": {
+      "main": [
+        [
+          {
+            "node": "GHL: Upsert Site Visit Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GHL: Upsert Site Visit Record": {
+      "main": [
+        [
+          {
+            "node": "Has Contact?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Contact?": {
+      "main": [
+        [
+          {
+            "node": "GHL: Write Contact Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GHL: Write Contact Note": {
+      "main": [
+        [
+          {
+            "node": "Supabase: Mark Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,56 @@
+{
+  "name": "AtticPlus \u2014 03 Prune Photos Older Than 12 Months",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "triggerAtDayOfMonth": 1,
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "id": "monthly",
+      "name": "Monthly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Delete photos older than 12 months, then null the paths.\n// This is what keeps the Supabase free tier \u2014 and the $0/month promise \u2014 intact.\n\nconst SUPABASE_URL = $env.SUPABASE_URL;\nconst KEY = $env.SUPABASE_SERVICE_ROLE_KEY;\nconst hdr = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };\n\nconst expired = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `${SUPABASE_URL}/rest/v1/expired_photos?select=*`,\n  headers: hdr, json: true,\n});\n\nif (!expired.length) return [{ json: { deleted: 0, message: 'Nothing to prune' } }];\n\nconst paths = [];\nfor (const row of expired) {\n  if (row.clockin_photo_path) paths.push(row.clockin_photo_path);\n  if (row.clockout_photo_path) paths.push(row.clockout_photo_path);\n}\n\n// Storage delete accepts up to 1000 paths per call.\nfor (let i = 0; i < paths.length; i += 500) {\n  await this.helpers.httpRequest({\n    method: 'DELETE',\n    url: `${SUPABASE_URL}/storage/v1/object/site-photos`,\n    headers: hdr,\n    body: { prefixes: paths.slice(i, i + 500) },\n    json: true,\n  });\n}\n\nfor (const row of expired) {\n  await this.helpers.httpRequest({\n    method: 'PATCH',\n    url: `${SUPABASE_URL}/rest/v1/site_visits?id=eq.${row.visit_id}`,\n    headers: { ...hdr, Prefer: 'return=minimal' },\n    body: { clockin_photo_path: null, clockout_photo_path: null },\n    json: true,\n  });\n}\n\nreturn [{ json: { deleted: paths.length, visits: expired.length } }];"
+      },
+      "id": "prune",
+      "name": "Prune",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Monthly": {
+      "main": [
+        [
+          {
+            "node": "Prune",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
